@@ -1,0 +1,214 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum OperacaoStatus {
+  ATIVA
+  ENCERRADA
+}
+
+enum ProdutoTipo {
+  IDA
+  VOLTA
+  COMBO
+  EM_PE
+}
+
+enum PassEstado {
+  DISPONIVEL
+  VENDIDO
+  USADO_IDA
+  NA_FILA
+  EMBARCOU
+}
+
+enum EventoTipo {
+  CHECKIN_IDA
+  CHECKIN_VOLTA_FILA
+  EMBARQUE_VOLTA
+}
+
+enum SaidaTipo {
+  IDA
+  VOLTA
+}
+
+enum SaidaStatus {
+  ABERTA
+  SAIU
+  ENCERRADA
+}
+
+model Evento {
+  id                  String   @id @default(uuid())
+  titulo              String
+  localTitulo         String
+  localDetalhe        String?
+  inicioIdas          DateTime // ex: 2026-03-01T12:00:00
+  fimIdas             DateTime // ex: 2026-03-02T00:00:00
+  tempoRotaMin        Int // ex: 90
+  minPagantesPorSaida Int // ex: 30
+  capacidadeSentado   Int // ex: 30
+  capacidadeEmPe      Int // ex: 10
+  ativo               Boolean  @default(true)
+  criadoEm            DateTime @default(now())
+
+  operacoes OperacaoDia[]
+  saidas    Saida[]
+
+  @@index([ativo])
+  @@index([inicioIdas])
+  @@index([fimIdas])
+}
+
+model OperacaoDia {
+  id       String         @id @default(uuid())
+  eventoId String
+  data     DateTime
+  status   OperacaoStatus @default(ATIVA)
+  criadoEm DateTime       @default(now())
+
+  evento Evento @relation(fields: [eventoId], references: [id])
+
+  pacotes PacotePasses[]
+  passes  Pass[]
+  saidas  Saida[]
+
+  @@index([eventoId])
+  @@index([status])
+  @@index([data])
+}
+
+model Saida {
+  id            String      @id @default(uuid())
+  eventoId      String
+  operacaoDiaId String
+  tipo          SaidaTipo
+  status        SaidaStatus @default(ABERTA)
+
+  estimadaPara    DateTime
+  confirmadaPara  DateTime?
+  vendidosNaSaida Int       @default(0)
+
+  criadoEm DateTime @default(now())
+
+  evento      Evento      @relation(fields: [eventoId], references: [id])
+  operacaoDia OperacaoDia @relation(fields: [operacaoDiaId], references: [id])
+
+  @@index([eventoId, tipo, status])
+  @@index([operacaoDiaId])
+  @@index([estimadaPara])
+}
+
+model Produto {
+  id          String      @id @default(uuid())
+  tipo        ProdutoTipo @unique
+  precoCent   Int
+  limiteTotal Int
+  limiteEmPe  Int?
+  ativo       Boolean     @default(true)
+
+  pacotes PacotePasses[]
+}
+
+model Motorista {
+  id    String  @id @default(uuid())
+  nome  String
+  ativo Boolean @default(true)
+
+  pacotes PacotePasses[]
+  eventos EventoScanner[]
+  vendas  VendaLocal[] // <-- ADICIONE ESTA LINHA
+  cursor  SyncCursor?
+}
+
+model PacotePasses {
+  id            String   @id @default(uuid())
+  operacaoDiaId String
+  motoristaId   String
+  produtoId     String
+  quantidade    Int
+  criadoEm      DateTime @default(now())
+
+  operacaoDia OperacaoDia @relation(fields: [operacaoDiaId], references: [id])
+  motorista   Motorista   @relation(fields: [motoristaId], references: [id])
+  produto     Produto     @relation(fields: [produtoId], references: [id])
+  passes      Pass[]
+
+  @@index([operacaoDiaId])
+  @@index([motoristaId])
+  @@index([produtoId])
+}
+
+model Pass {
+  id            String      @id @default(uuid())
+  pacoteId      String
+  operacaoDiaId String
+  produtoTipo   ProdutoTipo
+  payload       String
+  sig           String
+  estado        PassEstado  @default(DISPONIVEL)
+
+  vendidoNome String?
+  vendidoTel  String?
+  vendidoEm   DateTime?
+
+  pacote      PacotePasses @relation(fields: [pacoteId], references: [id])
+  operacaoDia OperacaoDia  @relation(fields: [operacaoDiaId], references: [id])
+
+  vendasLocais VendaLocal[]
+  eventos      EventoScanner[]
+
+  @@index([pacoteId])
+  @@index([operacaoDiaId])
+  @@index([produtoTipo])
+  @@index([estado])
+}
+
+model VendaLocal {
+  id             String   @id @default(uuid())
+  passId         String
+  motoristaId    String
+  idempotencyKey String // chave única da venda offline (ex: deviceSaleId)
+  nome           String
+  telefone       String
+  tsLocal        DateTime
+  criadoEm       DateTime @default(now())
+
+  pass      Pass      @relation(fields: [passId], references: [id])
+  motorista Motorista @relation(fields: [motoristaId], references: [id])
+
+  @@unique([motoristaId, idempotencyKey])
+  @@index([passId])
+  @@index([tsLocal])
+}
+
+model EventoScanner {
+  id          String     @id @default(uuid())
+  passId      String
+  tipo        EventoTipo
+  tsLocal     DateTime
+  motoristaId String
+  criadoEm    DateTime   @default(now())
+
+  pass      Pass      @relation(fields: [passId], references: [id])
+  motorista Motorista @relation(fields: [motoristaId], references: [id])
+
+  // idempotência: não duplica o mesmo tipo pro mesmo pass
+  @@unique([passId, tipo])
+  @@index([motoristaId])
+  @@index([tsLocal])
+}
+
+model SyncCursor {
+  motoristaId  String   @id
+  ultimoSyncEm DateTime @default(now())
+
+  motorista Motorista @relation(fields: [motoristaId], references: [id])
+}
