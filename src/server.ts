@@ -5,6 +5,7 @@ import { prisma } from "./prisma";
 
 import { adminRoutes } from "./routes/admin";
 import { driverRoutes } from "./routes/driver";
+import { clientRoutes } from "./routes/cliente";
 
 async function main() {
     const app = Fastify({ logger: true });
@@ -20,6 +21,7 @@ async function main() {
 
     await app.register(adminRoutes, { prefix: "/admin" });
     await app.register(driverRoutes, { prefix: "/driver" });
+    await app.register(clientRoutes, { prefix: "/cliente" });
 
     const port = Number(process.env.PORT || 3000);
     await app.listen({ port, host: "0.0.0.0" });
