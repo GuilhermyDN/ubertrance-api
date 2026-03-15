@@ -2,13 +2,34 @@ import { FastifyInstance } from "fastify";
 import { prisma } from "../prisma";
 import { z } from "zod";
 import crypto from "node:crypto";
+import { extrairMotoristaIdDoJwt } from "../lib/auth";
 
-type ScanTipo = "CHECKIN_IDA" | "CHECKIN_VOLTA_FILA" | "EMBARQUE_VOLTA";
+type ScanTipo =
+  | "CHECKIN_IDA"
+  | "CHECKIN_IDA_FILA"
+  | "CHECKIN_VOLTA_FILA"
+  | "EMBARQUE_VOLTA";
+
 type ProdutoTipo = "IDA" | "VOLTA" | "COMBO" | "EM_PE";
 
-function getMotoristaId(req: any) {
-  return String(req.headers["x-motorista-id"] || "").trim();
+// ── auth ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Extrai o motoristaId do JWT (Authorization: Bearer <token>).
+ * Mantém retro-compatibilidade com o header legado x-motorista-id
+ * enquanto o app não for totalmente migrado.
+ */
+function getMotoristaId(req: any): string {
+  // 1. JWT (nova forma)
+  const fromJwt = extrairMotoristaIdDoJwt(req.headers["authorization"]);
+  if (fromJwt) return fromJwt;
+
+  // 2. Header legado (retrocompat — remover após migração do app)
+  const legacy = String(req.headers["x-motorista-id"] || "").trim();
+  return legacy;
 }
+
+// ── QR helpers ───────────────────────────────────────────────────────────────
 
 function loadPublicKeyPem(): string {
   const b64 = process.env.QR_PUBLIC_KEY_B64;
@@ -66,6 +87,8 @@ export function verifyQrOffline(
   return { ok: true as const, payload };
 }
 
+// ── helpers de negócio ───────────────────────────────────────────────────────
+
 function isDentroJanelaIda(inicio: Date, fim: Date) {
   const now = new Date();
   return now >= inicio && now <= fim;
@@ -90,7 +113,7 @@ async function assertCapacidade(
     where: {
       operacaoDiaId,
       produtoTipo: { in: sentadoTipos as any },
-      estado: { in: ["VENDIDO", "USADO_IDA", "NA_FILA", "EMBARCOU"] as any },
+      estado: { in: ["VENDIDO", "USADO_IDA", "NA_FILA_IDA", "NA_FILA", "EMBARCOU"] as any },
     },
   });
 
@@ -98,7 +121,7 @@ async function assertCapacidade(
     where: {
       operacaoDiaId,
       produtoTipo: "EM_PE",
-      estado: { in: ["VENDIDO", "USADO_IDA", "NA_FILA", "EMBARCOU"] as any },
+      estado: { in: ["VENDIDO", "USADO_IDA", "NA_FILA_IDA", "NA_FILA", "EMBARCOU"] as any },
     },
   });
 
@@ -138,7 +161,7 @@ async function getProximaSaidaEstimada(operacaoDiaId: string) {
   const vendidosDesdeUltima = await prisma.pass.count({
     where: {
       operacaoDiaId,
-      estado: { in: ["VENDIDO", "USADO_IDA", "NA_FILA", "EMBARCOU"] as any },
+      estado: { in: ["VENDIDO", "USADO_IDA", "NA_FILA_IDA", "NA_FILA", "EMBARCOU"] as any },
       ...(lastSaida?.confirmadaPara
         ? { vendidoEm: { gt: lastSaida.confirmadaPara } }
         : {}),
@@ -183,6 +206,37 @@ async function getPassAndOwnership(passId: string, motoristaId: string) {
   return { ok: true as const, pass };
 }
 
+// ── aplicar transição de estado após evento de scanner ───────────────────────
+
+async function aplicarTransicaoEstado(
+  tipo: ScanTipo,
+  passId: string
+): Promise<void> {
+  if (tipo === "CHECKIN_IDA") {
+    await prisma.pass.update({
+      where: { id: passId },
+      data: { estado: "USADO_IDA" },
+    });
+  } else if (tipo === "CHECKIN_IDA_FILA") {
+    await prisma.pass.update({
+      where: { id: passId },
+      data: { estado: "NA_FILA_IDA" },
+    });
+  } else if (tipo === "CHECKIN_VOLTA_FILA") {
+    await prisma.pass.update({
+      where: { id: passId },
+      data: { estado: "NA_FILA" },
+    });
+  } else if (tipo === "EMBARQUE_VOLTA") {
+    await prisma.pass.update({
+      where: { id: passId },
+      data: { estado: "EMBARCOU" },
+    });
+  }
+}
+
+// ── rotas ────────────────────────────────────────────────────────────────────
+
 export async function driverRoutes(app: FastifyInstance) {
   app.get("/qr/public-key", async (_req, reply) => {
     return reply.send({
@@ -191,13 +245,14 @@ export async function driverRoutes(app: FastifyInstance) {
     });
   });
 
+  // ── GET /driver/pacotes/ativo ──────────────────────────────────────────────
   app.get("/pacotes/ativo", async (req: any, reply) => {
     const motoristaId = getMotoristaId(req);
 
     if (!motoristaId) {
       return reply
         .code(401)
-        .send({ ok: false, message: "Missing x-motorista-id" });
+        .send({ ok: false, message: "Autenticação necessária (Bearer token)." });
     }
 
     const op = await prisma.operacaoDia.findFirst({
@@ -222,6 +277,7 @@ export async function driverRoutes(app: FastifyInstance) {
         passes: {
           select: {
             id: true,
+            assentoId: true,
             estado: true,
             produtoTipo: true,
             payload: true,
@@ -240,7 +296,7 @@ export async function driverRoutes(app: FastifyInstance) {
       where: {
         operacaoDiaId: op.id,
         produtoTipo: { in: ["IDA", "VOLTA", "COMBO"] as any },
-        estado: { in: ["VENDIDO", "USADO_IDA", "NA_FILA", "EMBARCOU"] as any },
+        estado: { in: ["VENDIDO", "USADO_IDA", "NA_FILA_IDA", "NA_FILA", "EMBARCOU"] as any },
       },
     });
 
@@ -248,7 +304,7 @@ export async function driverRoutes(app: FastifyInstance) {
       where: {
         operacaoDiaId: op.id,
         produtoTipo: "EM_PE",
-        estado: { in: ["VENDIDO", "USADO_IDA", "NA_FILA", "EMBARCOU"] as any },
+        estado: { in: ["VENDIDO", "USADO_IDA", "NA_FILA_IDA", "NA_FILA", "EMBARCOU"] as any },
       },
     });
 
@@ -273,23 +329,33 @@ export async function driverRoutes(app: FastifyInstance) {
         minPagantesPorSaida: op.evento.minPagantesPorSaida,
         capacidadeSentado: op.evento.capacidadeSentado,
         capacidadeEmPe: op.evento.capacidadeEmPe,
+        // capacidade total da van por operação (sentado + em pé)
+        capacidadeTotal: op.evento.capacidadeSentado + op.evento.capacidadeEmPe,
       },
       capacidadeRestante: {
         sentado: Math.max(0, op.evento.capacidadeSentado - vendidosSentado),
         emPe: Math.max(0, op.evento.capacidadeEmPe - vendidosEmPe),
+        total: Math.max(
+          0,
+          op.evento.capacidadeSentado +
+            op.evento.capacidadeEmPe -
+            vendidosSentado -
+            vendidosEmPe
+        ),
       },
       proximaSaidaEstimada,
       pacotes,
     });
   });
 
+  // ── POST /driver/vender ────────────────────────────────────────────────────
   app.post("/vender", async (req: any, reply) => {
     const motoristaId = getMotoristaId(req);
 
     if (!motoristaId) {
       return reply
         .code(401)
-        .send({ ok: false, message: "Missing x-motorista-id" });
+        .send({ ok: false, message: "Autenticação necessária (Bearer token)." });
     }
 
     const body = z
@@ -340,6 +406,7 @@ export async function driverRoutes(app: FastifyInstance) {
       },
       select: {
         id: true,
+        assentoId: true,
         estado: true,
         produtoTipo: true,
         payload: true,
@@ -356,18 +423,24 @@ export async function driverRoutes(app: FastifyInstance) {
     });
   });
 
+  // ── POST /driver/scan ──────────────────────────────────────────────────────
   app.post("/scan", async (req: any, reply) => {
     const motoristaId = getMotoristaId(req);
 
     if (!motoristaId) {
       return reply
         .code(401)
-        .send({ ok: false, message: "Missing x-motorista-id" });
+        .send({ ok: false, message: "Autenticação necessária (Bearer token)." });
     }
 
     const body = z
       .object({
-        tipo: z.enum(["CHECKIN_IDA", "CHECKIN_VOLTA_FILA", "EMBARQUE_VOLTA"]),
+        tipo: z.enum([
+          "CHECKIN_IDA",
+          "CHECKIN_IDA_FILA",
+          "CHECKIN_VOLTA_FILA",
+          "EMBARQUE_VOLTA",
+        ]),
         qrPayload: z.string().min(10),
         qrSig: z.string().min(10),
       })
@@ -447,7 +520,18 @@ export async function driverRoutes(app: FastifyInstance) {
       });
     }
 
-    if (body.tipo === "CHECKIN_IDA" && pass.estado !== "VENDIDO") {
+    // ── validação de máquina de estados ──
+    if (body.tipo === "CHECKIN_IDA_FILA" && pass.estado !== "VENDIDO") {
+      return reply.code(400).send({
+        ok: false,
+        message: `CHECKIN_IDA_FILA inválido para estado=${pass.estado}`,
+      });
+    }
+
+    if (
+      body.tipo === "CHECKIN_IDA" &&
+      !["VENDIDO", "NA_FILA_IDA"].includes(pass.estado)
+    ) {
       return reply.code(400).send({
         ok: false,
         message: `CHECKIN_IDA inválido para estado=${pass.estado}`,
@@ -484,33 +568,19 @@ export async function driverRoutes(app: FastifyInstance) {
       return reply.code(200).send({ ok: true, alreadyRecorded: true });
     }
 
-    if (body.tipo === "CHECKIN_IDA") {
-      await prisma.pass.update({
-        where: { id: pass.id },
-        data: { estado: "USADO_IDA" },
-      });
-    } else if (body.tipo === "CHECKIN_VOLTA_FILA") {
-      await prisma.pass.update({
-        where: { id: pass.id },
-        data: { estado: "NA_FILA" },
-      });
-    } else if (body.tipo === "EMBARQUE_VOLTA") {
-      await prisma.pass.update({
-        where: { id: pass.id },
-        data: { estado: "EMBARCOU" },
-      });
-    }
+    await aplicarTransicaoEstado(body.tipo, pass.id);
 
     return reply.send({ ok: true });
   });
 
+  // ── POST /driver/sync ──────────────────────────────────────────────────────
   app.post("/sync", async (req: any, reply) => {
     const motoristaId = getMotoristaId(req);
 
     if (!motoristaId) {
       return reply
         .code(401)
-        .send({ ok: false, message: "Missing x-motorista-id" });
+        .send({ ok: false, message: "Autenticação necessária (Bearer token)." });
     }
 
     const body = z
@@ -530,7 +600,12 @@ export async function driverRoutes(app: FastifyInstance) {
           .array(
             z.object({
               passId: z.string(),
-              tipo: z.enum(["CHECKIN_IDA", "CHECKIN_VOLTA_FILA", "EMBARQUE_VOLTA"]),
+              tipo: z.enum([
+                "CHECKIN_IDA",
+                "CHECKIN_IDA_FILA",
+                "CHECKIN_VOLTA_FILA",
+                "EMBARQUE_VOLTA",
+              ]),
               tsLocalISO: z.string(),
             })
           )
@@ -603,7 +678,7 @@ export async function driverRoutes(app: FastifyInstance) {
               vendidoEm: new Date(v.tsLocalISO),
             },
           })
-          .catch(() => { });
+          .catch(() => {});
       }
 
       results.vendas_ok++;
@@ -630,28 +705,7 @@ export async function driverRoutes(app: FastifyInstance) {
         results.eventos_skip++;
       }
 
-      if (e.tipo === "CHECKIN_IDA") {
-        await prisma.pass
-          .update({
-            where: { id: e.passId },
-            data: { estado: "USADO_IDA" },
-          })
-          .catch(() => { });
-      } else if (e.tipo === "CHECKIN_VOLTA_FILA") {
-        await prisma.pass
-          .update({
-            where: { id: e.passId },
-            data: { estado: "NA_FILA" },
-          })
-          .catch(() => { });
-      } else if (e.tipo === "EMBARQUE_VOLTA") {
-        await prisma.pass
-          .update({
-            where: { id: e.passId },
-            data: { estado: "EMBARCOU" },
-          })
-          .catch(() => { });
-      }
+      await aplicarTransicaoEstado(e.tipo, e.passId).catch(() => {});
     }
 
     await prisma.syncCursor.upsert({

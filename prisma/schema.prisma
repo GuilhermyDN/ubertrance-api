@@ -24,12 +24,14 @@ enum PassEstado {
   DISPONIVEL
   VENDIDO
   USADO_IDA
+  NA_FILA_IDA
   NA_FILA
   EMBARCOU
 }
 
 enum EventoTipo {
   CHECKIN_IDA
+  CHECKIN_IDA_FILA
   CHECKIN_VOLTA_FILA
   EMBARQUE_VOLTA
 }
@@ -118,13 +120,15 @@ model Produto {
 }
 
 model Motorista {
-  id    String  @id @default(uuid())
-  nome  String
-  ativo Boolean @default(true)
+  id        String  @id @default(uuid())
+  nome      String
+  email     String? @unique
+  senhaHash String?
+  ativo     Boolean @default(true)
 
   pacotes PacotePasses[]
   eventos EventoScanner[]
-  vendas  VendaLocal[] // <-- ADICIONE ESTA LINHA
+  vendas  VendaLocal[]
   cursor  SyncCursor?
 }
 
@@ -151,6 +155,7 @@ model Pass {
   pacoteId      String
   operacaoDiaId String
   produtoTipo   ProdutoTipo
+  assentoId     Int?
   payload       String
   sig           String
   estado        PassEstado  @default(DISPONIVEL)

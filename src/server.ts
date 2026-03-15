@@ -6,6 +6,7 @@ import { prisma } from "./prisma";
 import { adminRoutes } from "./routes/admin";
 import { driverRoutes } from "./routes/driver";
 import { clientRoutes } from "./routes/cliente";
+import { authRoutes } from "./routes/auth";
 
 async function main() {
     const app = Fastify({ logger: true });
@@ -19,6 +20,7 @@ async function main() {
         return { ok: true, now };
     });
 
+    await app.register(authRoutes, { prefix: "/auth" });
     await app.register(adminRoutes, { prefix: "/admin" });
     await app.register(driverRoutes, { prefix: "/driver" });
     await app.register(clientRoutes, { prefix: "/cliente" });
