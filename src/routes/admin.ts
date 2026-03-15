@@ -192,18 +192,29 @@ export async function adminRoutes(app: FastifyInstance) {
       },
     });
 
+    // calcula o próximo assentoId disponível para esta operação
+    const maxAssento = await prisma.pass.aggregate({
+      where: { operacaoDiaId: body.operacaoDiaId },
+      _max: { assentoId: true },
+    });
+    let nextAssento = (maxAssento._max.assentoId ?? 0) + 1;
+
     const createdPasses: Array<{
       id: string;
+      assentoId: number;
       payload: string;
       sig: string;
     }> = [];
 
     for (let i = 0; i < body.quantidade; i++) {
+      const assentoId = nextAssento++;
+
       const pass = await prisma.pass.create({
         data: {
           pacoteId: pacote.id,
           operacaoDiaId: body.operacaoDiaId,
           produtoTipo: body.produtoTipo as any,
+          assentoId,
           payload: "{}",
           sig: "pending",
         },
@@ -221,6 +232,7 @@ export async function adminRoutes(app: FastifyInstance) {
         produto: body.produtoTipo,
         produtoTipo: body.produtoTipo,
         motoristaId: body.motoristaId,
+        assentoId,
         nonce: b64url(crypto.randomBytes(8)),
         iat,
         exp,
@@ -239,6 +251,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
       createdPasses.push({
         id: pass.id,
+        assentoId,
         payload: payloadStr,
         sig,
       });
@@ -450,8 +463,16 @@ export async function adminRoutes(app: FastifyInstance) {
       },
     });
 
+    // calcula o próximo assentoId disponível para esta operação
+    const maxAssento2 = await prisma.pass.aggregate({
+      where: { operacaoDiaId: pendencia.operacaoDiaId },
+      _max: { assentoId: true },
+    });
+    let nextAssento2 = (maxAssento2._max.assentoId ?? 0) + 1;
+
     const passesCriados: Array<{
       id: string;
+      assentoId: number | null;
       estado: string;
       produtoTipo: string;
       payload: string;
@@ -462,11 +483,14 @@ export async function adminRoutes(app: FastifyInstance) {
     }> = [];
 
     for (let i = 0; i < pendencia.quantidade; i++) {
+      const assentoId2 = nextAssento2++;
+
       const pass = await prisma.pass.create({
         data: {
           pacoteId: pacote.id,
           operacaoDiaId: pendencia.operacaoDiaId,
           produtoTipo: pendencia.produtoTipo as any,
+          assentoId: assentoId2,
           payload: "{}",
           sig: "pending",
           estado: "VENDIDO" as any,
@@ -495,6 +519,7 @@ export async function adminRoutes(app: FastifyInstance) {
         produto: pendencia.produtoTipo,
         produtoTipo: pendencia.produtoTipo,
         motoristaId: body.motoristaId,
+        assentoId: assentoId2,
         nonce: b64url(crypto.randomBytes(8)),
         iat,
         exp,
@@ -511,6 +536,7 @@ export async function adminRoutes(app: FastifyInstance) {
         },
         select: {
           id: true,
+          assentoId: true,
           estado: true,
           produtoTipo: true,
           payload: true,
