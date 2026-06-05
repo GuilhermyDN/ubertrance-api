@@ -1,1 +1,9 @@
 node_modules/
+
+# seguranca
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+node_modules/
